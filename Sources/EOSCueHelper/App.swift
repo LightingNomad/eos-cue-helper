@@ -115,12 +115,9 @@ struct UpdateBanner: View {
 
 struct ConnectionSection: View {
     @EnvironmentObject var model: AppModel
-    @AppStorage(Pref.mode) private var mode = ConnMode.udp
     @AppStorage(Pref.eosIP) private var eosIP = "127.0.0.1"
     @AppStorage(Pref.udpSendPort) private var udpSendPort = 8000
     @AppStorage(Pref.udpListenPort) private var udpListenPort = 8001
-    @AppStorage(Pref.tcpPort) private var tcpPort = 3037
-    @AppStorage(Pref.tcpFraming) private var tcpFraming = TCPClient.Framing.slip.rawValue
     @State private var expanded = false
 
     var dotColor: Color {
@@ -150,49 +147,25 @@ struct ConnectionSection: View {
                     Divider()
                     Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 6) {
                         GridRow {
-                            Text("Protocol")
-                            Picker("", selection: $mode) {
-                                ForEach(ConnMode.allCases) { Text($0.rawValue).tag($0) }
-                            }
-                            .pickerStyle(.segmented).labelsHidden().frame(width: 120)
-                        }
-                        GridRow {
                             Text("EOS IP")
                             TextField("192.168.1.100", text: $eosIP).frame(width: 150)
                         }
-                        if mode == .udp {
-                            GridRow {
-                                Text("Send to port")
-                                HStack {
-                                    TextField("", value: $udpSendPort, format: .number.grouping(.never)).frame(width: 70)
-                                    Text("EOS \"OSC UDP RX Port\"").foregroundStyle(.secondary).font(.caption)
-                                }
-                            }
-                        } else {
-                            GridRow {
-                                Text("TCP port")
-                                HStack {
-                                    TextField("", value: $tcpPort, format: .number.grouping(.never)).frame(width: 70)
-                                    Picker("", selection: $tcpFraming) {
-                                        Text("OSC 1.1 (SLIP) – 3037").tag(TCPClient.Framing.slip.rawValue)
-                                        Text("OSC 1.0 – 3032").tag(TCPClient.Framing.length.rawValue)
-                                    }
-                                    .labelsHidden().frame(width: 180)
-                                }
+                        GridRow {
+                            Text("Send to port")
+                            HStack {
+                                TextField("", value: $udpSendPort, format: .number.grouping(.never)).frame(width: 70)
+                                Text("EOS \"OSC UDP RX Port\"").foregroundStyle(.secondary).font(.caption)
                             }
                         }
                         GridRow {
-                            Text("Listen on UDP")
+                            Text("Listen on port")
                             HStack {
                                 TextField("", value: $udpListenPort, format: .number.grouping(.never)).frame(width: 70)
-                                Text(mode == .udp ? "EOS \"OSC UDP TX Port\" + Cuelist triggers" : "for Cuelist / other triggers")
-                                    .foregroundStyle(.secondary).font(.caption)
+                                Text("EOS \"OSC UDP TX Port\"").foregroundStyle(.secondary).font(.caption)
                             }
                         }
                     }
-                    Text(mode == .udp
-                         ? "In EOS Setup ▸ System ▸ Show Control ▸ OSC: turn on OSC RX and OSC TX, set OSC UDP TX IP Address to this Mac."
-                         : "In EOS Setup ▸ System ▸ Show Control ▸ OSC: turn on OSC RX and OSC TX. TCP needs no IP setup in EOS.")
+                    Text("In EOS Setup ▸ System ▸ Show Control ▸ OSC: turn on OSC RX and OSC TX, set OSC UDP TX IP Address to this Mac (127.0.0.1 if EOS runs on this Mac), and match the two ports above.")
                         .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     HStack {
                         Spacer()
@@ -443,6 +416,8 @@ struct SettingsView: View {
                 Text("""
                 /cuelist/next   /cuelist/last   /cuelist/page=12
                 /label/prefix="My Prefix"   /label/suffix="My Suffix"
+                /label/prefix/remove="My Label"   (strip from start or end)
+                /label/suffix/remove="My Label"   (same)
                 /label/prefix   /label/suffix   (use the text in the app)
                 /label/both   /label/remove   /label/undo   /label/cue="2/5"
                 """)

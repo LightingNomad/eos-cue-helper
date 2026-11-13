@@ -7,11 +7,6 @@ struct CueRef: Equatable, Hashable {
     var display: String { "\(list)/\(number)" }
 }
 
-enum ConnMode: String, CaseIterable, Identifiable {
-    case udp = "UDP", tcp = "TCP"
-    var id: String { rawValue }
-}
-
 enum TargetSource: String, CaseIterable, Identifiable {
     case commandLine = "Command line"
     case pending = "Pending cue"
@@ -21,6 +16,8 @@ enum TargetSource: String, CaseIterable, Identifiable {
 
 enum LabelOp: String {
     case prefix, suffix, both, remove
+    /// Remove a given piece of text from the start and/or end of the label (passed as the prefix text).
+    case strip
 }
 
 struct LogLine: Identifiable {
@@ -33,12 +30,9 @@ struct LogLine: Identifiable {
 
 /// Preference keys + defaults. Views bind to these with @AppStorage.
 enum Pref {
-    static let mode = "mode"
     static let eosIP = "eosIP"
     static let udpSendPort = "udpSendPort"
     static let udpListenPort = "udpListenPort"
-    static let tcpPort = "tcpPort"
-    static let tcpFraming = "tcpFraming"
     static let targetSource = "targetSource"
     static let defaultList = "defaultList"
     static let prefix = "prefix"
@@ -53,12 +47,9 @@ enum Pref {
 
     static func register() {
         UserDefaults.standard.register(defaults: [
-            mode: ConnMode.udp.rawValue,
             eosIP: "127.0.0.1",
             udpSendPort: 8000,
             udpListenPort: 8001,
-            tcpPort: 3037,
-            tcpFraming: TCPClient.Framing.slip.rawValue,
             targetSource: TargetSource.commandLine.rawValue,
             defaultList: "1",
             prefix: "",
@@ -80,15 +71,12 @@ final class AppModel: ObservableObject {
 
     private let d = UserDefaults.standard
     private let udp = UDPSocket()
-    private let tcp = TCPClient()
     private var labelTimeout: DispatchWorkItem?
     private var pendingOp: (op: LabelOp, prefix: String?, suffix: String?)?
     private var activity: NSObjectProtocol?
 
     // Connection
     @Published var running = false
-    @Published private(set) var activeMode: ConnMode = .udp
-    @Published var tcpConnected = false
     @Published var connError: String?
     @Published var lastHeardFromEOS: Date?
     @Published var eosVersion: String?
@@ -116,36 +104,13 @@ final class AppModel: ObservableObject {
                                                          reason: "Live OSC control of EOS")
         udp.onReceive = { [weak self] data, ip in
             let msgs = OSCMessage.decode(data)
-            Task { @MainActor in msgs.forEach { self?.handle($0, from: "udp \(ip)") } }
+            Task { @MainActor in msgs.forEach { self?.handle($0) } }
         }
         udp.onError = { [weak self] e in Task { @MainActor in self?.addLog(.error, e) } }
-        tcp.onPacket = { [weak self] data in
-            let msgs = OSCMessage.decode(data)
-            Task { @MainActor in msgs.forEach { self?.handle($0, from: "tcp") } }
-        }
-        tcp.onState = { [weak self] st in
-            Task { @MainActor in
-                guard let self else { return }
-                switch st {
-                case .connecting:
-                    self.tcpConnected = false
-                case .connected:
-                    self.tcpConnected = true
-                    self.connError = nil
-                    self.addLog(.info, "TCP connected to EOS")
-                    self.hello()
-                case .disconnected(let why):
-                    if self.tcpConnected { self.addLog(.error, "TCP disconnected: \(why)") }
-                    self.tcpConnected = false
-                    self.connError = "TCP: \(why) — retrying…"
-                }
-            }
-        }
     }
 
     // MARK: - Settings access
 
-    var mode: ConnMode { ConnMode(rawValue: d.string(forKey: Pref.mode) ?? "") ?? .udp }
     var eosIP: String { (d.string(forKey: Pref.eosIP) ?? "").trimmingCharacters(in: .whitespaces) }
     var targetSource: TargetSource { TargetSource(rawValue: d.string(forKey: Pref.targetSource) ?? "") ?? .commandLine }
     var prefix: String { d.string(forKey: Pref.prefix) ?? "" }
@@ -157,8 +122,7 @@ final class AppModel: ObservableObject {
 
     var health: Health {
         if !running { return .off }
-        if activeMode == .tcp && !tcpConnected { return connError == nil ? .waiting : .error }
-        if activeMode == .tcp || lastHeardFromEOS != nil { return .ok }
+        if lastHeardFromEOS != nil { return .ok }
         return connError == nil ? .waiting : .error
     }
 
@@ -167,21 +131,19 @@ final class AppModel: ObservableObject {
         case .off: return "Not connected"
         case .ok: return "Connected to EOS" + (eosVersion.map { " \($0)" } ?? "")
         case .waiting:
-            return activeMode == .tcp && !tcpConnected ? "Connecting to \(eosIP):\(d.integer(forKey: Pref.tcpPort))…"
-                : "Listening — nothing heard from EOS yet (check EOS OSC TX settings)"
+            return "Listening — nothing heard from EOS yet (check EOS OSC TX settings)"
         case .error: return connError ?? "Error"
         }
     }
 
     func connect() {
         disconnect(quiet: true)
-        activeMode = mode
         running = true
         connError = nil
         eosVersion = nil
         lastHeardFromEOS = nil
 
-        // Always listen on UDP: EOS (in UDP mode) and anything else (Stream Deck, QLab…) can send here.
+        // EOS output, Send_String macros, and anything else (Stream Deck, QLab…) all arrive here.
         let listen = d.integer(forKey: Pref.udpListenPort)
         do {
             try udp.open(port: UInt16(clamping: listen))
@@ -191,21 +153,12 @@ final class AppModel: ObservableObject {
             addLog(.error, error.localizedDescription)
         }
 
-        if activeMode == .tcp {
-            let port = d.integer(forKey: Pref.tcpPort)
-            let framing = TCPClient.Framing(rawValue: d.string(forKey: Pref.tcpFraming) ?? "") ?? .slip
-            addLog(.info, "Connecting TCP to \(eosIP):\(port) (\(framing == .slip ? "OSC 1.1 SLIP" : "OSC 1.0"))")
-            tcp.start(host: eosIP, port: UInt16(clamping: port), framing: framing)
-        } else {
-            addLog(.info, "Sending UDP to \(eosIP):\(d.integer(forKey: Pref.udpSendPort))")
-            hello()
-        }
+        addLog(.info, "Sending UDP to \(eosIP):\(d.integer(forKey: Pref.udpSendPort))")
+        hello()
     }
 
     func disconnect(quiet: Bool = false) {
         udp.close()
-        tcp.stop()
-        tcpConnected = false
         if running && !quiet { addLog(.info, "Disconnected") }
         running = false
     }
@@ -223,27 +176,17 @@ final class AppModel: ObservableObject {
             return
         }
         if log { addLog(.tx, msg.debugText) }
-        let data = msg.encoded()
-        if activeMode == .tcp {
-            if !tcpConnected && log { addLog(.error, "TCP not connected yet") }
-            tcp.send(data)
-        } else {
-            udp.send(data, host: eosIP, port: UInt16(clamping: d.integer(forKey: Pref.udpSendPort)))
-        }
+        udp.send(msg.encoded(), host: eosIP, port: UInt16(clamping: d.integer(forKey: Pref.udpSendPort)))
     }
 
     // MARK: - Incoming
 
-    private func handle(_ m: OSCMessage, from source: String) {
+    private func handle(_ m: OSCMessage) {
         let p = m.parts
         let lower = m.address.lowercased()
 
-        // In TCP mode, EOS also copies its /eos/out traffic to the UDP TX address (needed for Send_String).
-        // Use only the TCP copy so events aren't handled twice. /cuelist and /label still work over UDP.
-        if activeMode == .tcp && source.hasPrefix("udp") && p.first == "eos" { return }
-
         if p.first == "eos" {
-            if lastHeardFromEOS == nil && activeMode == .udp { connError = nil }
+            if lastHeardFromEOS == nil { connError = nil }
             lastHeardFromEOS = Date()
         }
 
@@ -419,6 +362,15 @@ final class AppModel: ObservableObject {
                 label = String(label.dropLast(s.count))
                 if d.bool(forKey: Pref.autoSpace) { while label.last == " " { label.removeLast() } }
             }
+        case .strip:
+            // Same text checked at both ends; spaces left over at the cut are trimmed.
+            if !p.isEmpty && label.hasPrefix(p) {
+                label = String(label.dropFirst(p.count).drop(while: { $0 == " " }))
+            }
+            if !p.isEmpty && label.hasSuffix(p) {
+                label = String(label.dropLast(p.count))
+                while label.last == " " { label.removeLast() }
+            }
         }
         return label
     }
@@ -433,7 +385,13 @@ final class AppModel: ObservableObject {
         }
         let new = preview(op, current: current, prefix: pfx, suffix: sfx)
         guard new != current else {
-            addLog(.info, "Cue \(t.display) already has that \(op == .remove ? "removed" : op.rawValue) — no change")
+            let what: String
+            switch op {
+            case .remove: what = "Cue \(t.display) doesn't start/end with the prefix/suffix"
+            case .strip: what = "Cue \(t.display) doesn't start or end with \"\(pfx ?? "")\""
+            default: what = "Cue \(t.display) already has that \(op.rawValue)"
+            }
+            addLog(.info, what + " — no change")
             return
         }
         writeLabel(new, to: t, old: current)
@@ -457,18 +415,16 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Splits "/label/prefix=\"My Prefix\"", "/label/prefix \"My Prefix\"" (string arg) or "/cuelist/page/12"
-    /// into a lower-cased command and an optional value (quotes stripped, case kept).
-    private func splitCommand(_ m: OSCMessage) -> (cmd: String, value: String?) {
+    /// Splits "/label/prefix/remove=\"My Label\"" into path ["prefix", "remove"] and value "My Label".
+    /// The value can also come as the first argument (how EOS Send_String delivers "…=value").
+    /// Path keeps its case (page names); compare with lowercased(). Surrounding quotes are stripped.
+    private func splitCommand(_ m: OSCMessage) -> (path: [String], value: String?) {
         let rest = m.parts.dropFirst().joined(separator: "/")
-        var cmd = rest
+        var left = rest
         var value: String?
         if let eq = rest.firstIndex(of: "=") {
-            cmd = String(rest[..<eq])
+            left = String(rest[..<eq])
             value = String(rest[rest.index(after: eq)...])
-        } else if let slash = rest.firstIndex(of: "/") {
-            cmd = String(rest[..<slash])
-            value = String(rest[rest.index(after: slash)...])
         }
         if value?.isEmpty ?? true, let a = m.args.first { value = a.text }
         value = value.map { v in
@@ -479,16 +435,26 @@ final class AppModel: ObservableObject {
             }
             return s
         }
-        return (cmd.lowercased(), value)
+        if value?.isEmpty == true { value = nil }
+        return (left.split(separator: "/").map(String.init), value)
     }
 
-    /// /label/prefix="My Prefix", /label/suffix="My Suffix", /label/both, /label/remove, /label/undo, /label/cue="2/5"
-    /// (/labeler/... works too). With text, it also becomes the app's current prefix/suffix.
+    /// /label/prefix="My Prefix"          add that prefix (also becomes the app's prefix)
+    /// /label/suffix="My Suffix"          add that suffix (also becomes the app's suffix)
+    /// /label/prefix/remove="My Label"    remove that text from the start or end of the label
+    /// /label/suffix/remove="My Label"    same
+    /// /label/remove                      remove the app's current prefix/suffix
+    /// /label/both, /label/undo, /label/cue="2/5"      (/labeler/... works too)
     private func handleLabelerTrigger(_ m: OSCMessage) {
         addLog(.rx, m.debugText)
-        let (cmd, value) = splitCommand(m)
-        let text = (value?.isEmpty ?? true) ? nil : value
-        switch cmd {
+        let (path, text) = splitCommand(m)
+        let cmd = path.map { $0.lowercased() }
+        if cmd.contains("remove") {
+            // /label/remove, /label/prefix/remove="X", /label/suffix/remove="X"
+            if let text { apply(.strip, prefix: text) } else { apply(.remove) }
+            return
+        }
+        switch cmd.first ?? "" {
         case "prefix":
             if let text { d.set(text, forKey: Pref.prefix) }
             apply(.prefix, prefix: text)
@@ -496,10 +462,11 @@ final class AppModel: ObservableObject {
             if let text { d.set(text, forKey: Pref.suffix) }
             apply(.suffix, suffix: text)
         case "both", "apply": apply(.both)
-        case "remove": apply(.remove)
         case "undo": undo()
         case "cue", "target":
-            if let text { setTargetFromText(text) }
+            if let cue = text ?? (path.count > 1 ? path.dropFirst().joined(separator: "/") : nil) {
+                setTargetFromText(cue)
+            }
         default: addLog(.error, "Unknown label command \(m.address)")
         }
     }
@@ -513,12 +480,13 @@ final class AppModel: ObservableObject {
             addLog(.info, "Cuelist control is turned off — ignored")
             return
         }
-        let (cmd, value) = splitCommand(m)
-        switch cmd {
+        let (path, arg) = splitCommand(m)
+        let value = arg ?? (path.count > 1 ? path.dropFirst().joined(separator: "/") : nil)
+        switch path.first?.lowercased() ?? "" {
         case "next", "forward", "fwd": cuelist(.next)
         case "last", "prev", "previous", "back": cuelist(.previous)
         case "page", "goto":
-            if let v = value, !v.isEmpty {
+            if let v = value {
                 cuelist(.page(v))
             } else {
                 addLog(.error, "\(m.address) needs a page number, e.g. /cuelist/page=12")
