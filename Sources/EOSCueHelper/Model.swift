@@ -238,6 +238,10 @@ final class AppModel: ObservableObject {
         let p = m.parts
         let lower = m.address.lowercased()
 
+        // In TCP mode, EOS also copies its /eos/out traffic to the UDP TX address (needed for Send_String).
+        // Use only the TCP copy so events aren't handled twice. /cuelist and /label still work over UDP.
+        if activeMode == .tcp && source.hasPrefix("udp") && p.first == "eos" { return }
+
         if p.first == "eos" {
             if lastHeardFromEOS == nil && activeMode == .udp { connError = nil }
             lastHeardFromEOS = Date()

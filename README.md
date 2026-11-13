@@ -34,11 +34,13 @@ This bumps `VERSION`, tags the commit and pushes it. GitHub Actions then builds 
 |---|---|---|
 | OSC RX / OSC TX | On | On |
 | OSC UDP RX Port | 8000 (app's "Send to port") | — |
-| OSC UDP TX Port | 8001 (app's "Listen on UDP") | — |
-| OSC UDP TX IP Address | this Mac's IP | — |
+| OSC UDP TX Port | 8001 (app's "Listen on UDP") | 8001 too, if macros use `Send_String` |
+| OSC UDP TX IP Address | this Mac's IP | this Mac's IP too, if macros use `Send_String` (127.0.0.1 when EOS runs on this Mac) |
 | App setting | Protocol UDP | Protocol TCP, port 3037 (SLIP) or 3032 (OSC 1.0) |
 
 The app always listens on its UDP port, including in TCP mode, so Cuelist and labeler triggers can come from anything: EOS macros, a Stream Deck, QLab and so on.
+
+**EOS `Send_String` (OSC) always goes out over UDP** to the OSC UDP TX IP Address and Port, even when the app is connected over TCP. In TCP mode, the app ignores the copy of EOS's own `/eos/out` traffic that arrives over UDP, so events aren't handled twice.
 
 Labels are written as `/eos/set/cue/<list>/<cue>/label "text"`, so the command line is never touched. The app never pings EOS. It only sends a single version request when it connects, plus one label read whenever the target cue changes.
 
