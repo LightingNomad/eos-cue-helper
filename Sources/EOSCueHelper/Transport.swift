@@ -65,10 +65,28 @@ final class UDPSocket {
                 }
             }
             if n <= 0 { break }
-            let ip = String(cString: inet_ntoa(from.sin_addr))
-            onReceive?(Data(buf[0..<n]), ip)
+            let sender = "\(String(cString: inet_ntoa(from.sin_addr))):\(UInt16(bigEndian: from.sin_port))"
+            let data = Data(buf[0..<n])
+            // EOS can deliver the same packet twice (e.g. EOS offline sending over loopback from two sockets).
+            // Drop an exact repeat that arrives within 150 ms — far faster than any real double press.
+            let now = Date()
+            recent.removeAll { now.timeIntervalSince($0.time) > 0.15 }
+            if let dup = recent.first(where: { $0.data == data }) {
+                if !reportedDuplicate {
+                    reportedDuplicate = true
+                    onDuplicate?("EOS is sending every message twice (from \(dup.sender) and \(sender)). Ignoring the copies.")
+                }
+                continue
+            }
+            recent.append((data, now, sender))
+            onReceive?(data, sender)
         }
     }
+
+    private var recent: [(data: Data, time: Date, sender: String)] = []
+    private var reportedDuplicate = false
+    /// Called once, the first time a duplicate packet is dropped.
+    var onDuplicate: ((String) -> Void)?
 
     func send(_ data: Data, host: String, port: UInt16) {
         queue.async { [self] in

@@ -107,6 +107,7 @@ final class AppModel: ObservableObject {
             Task { @MainActor in msgs.forEach { self?.handle($0) } }
         }
         udp.onError = { [weak self] e in Task { @MainActor in self?.addLog(.error, e) } }
+        udp.onDuplicate = { [weak self] e in Task { @MainActor in self?.addLog(.info, e) } }
     }
 
     // MARK: - Settings access
