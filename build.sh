@@ -13,7 +13,7 @@ REPO="${GITHUB_REPO:-LightingNomad/eos-cue-helper}"
 VERSION="$(tr -d '[:space:]' < VERSION)"
 BUILD_NUM="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
 
-echo "▸ Compiling $APP_NAME $VERSION…"
+echo "▸ Compiling ${APP_NAME} ${VERSION}…"
 swift build -c release --arch arm64
 BIN="$(swift build -c release --arch arm64 --show-bin-path)/$EXEC"
 
