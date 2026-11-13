@@ -5,7 +5,7 @@ import Foundation
 /// Requires Chrome ▸ View ▸ Developer ▸ "Allow JavaScript from Apple Events".
 enum CuelistDriver {
     enum Action: Equatable {
-        case next, previous, page(Int)
+        case next, previous, page(String)
 
         var name: String {
             switch self {
@@ -20,8 +20,9 @@ enum CuelistDriver {
 
     // Finds the page-number box in Cuelist's toolbar (the numeric text box next to "/ 123").
     private static let findPageBox = """
-    var box = Array.prototype.slice.call(document.querySelectorAll('input[type=text],input:not([type])'))
-      .filter(function (x) { return /^\\s*\\d+\\s*$/.test(x.value); })[0];
+    var box = document.querySelector('input.current-page-input') ||
+      Array.prototype.slice.call(document.querySelectorAll('input[type=text]'))
+        .filter(function (x) { return /^\\s*\\d+\\s*$/.test(x.value); })[0];
     function total() {
       if (!box) return '';
       var n = box.parentElement, m = null;
@@ -44,20 +45,17 @@ enum CuelistDriver {
               return 'ok';
             })()
             """
-        case .page(let n):
+        case .page(let name):
+            // Cuelist's page box (Vue) only acts on a `change` event and matches page *names* exactly.
+            let quoted = String(data: try! JSONEncoder().encode(name), encoding: .utf8)!
             return """
             (function () {
               \(findPageBox)
               if (!box) return 'ERR:Could not find the page number box in Cuelist';
               var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-              box.focus();
-              setter.call(box, '\(n)');
+              setter.call(box, \(quoted));
               box.dispatchEvent(new Event('input', {bubbles: true}));
-              var o = {key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true};
-              box.dispatchEvent(new KeyboardEvent('keydown', o));
-              box.dispatchEvent(new KeyboardEvent('keypress', o));
-              box.dispatchEvent(new KeyboardEvent('keyup', o));
-              box.blur();
+              box.dispatchEvent(new Event('change', {bubbles: true}));
               return 'ok';
             })()
             """

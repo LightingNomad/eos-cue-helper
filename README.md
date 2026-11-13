@@ -40,7 +40,7 @@ This bumps `VERSION`, tags the commit and pushes it. GitHub Actions then builds 
 
 The app always listens on its UDP port, including in TCP mode, so Cuelist and labeler triggers can come from anything: EOS macros, a Stream Deck, QLab and so on.
 
-Labels are written as `/eos/newcmd "Cue {list}/{cue} Label {label}#"`. You can change this template in Settings.
+Labels are written as `/eos/set/cue/<list>/<cue>/label "text"`, so the command line is never touched. The app never pings EOS. It only sends a single version request when it connects, plus one label read whenever the target cue changes.
 
 ## OSC triggers (send to the app's UDP listen port, or from EOS)
 
@@ -49,12 +49,15 @@ Labels are written as `/eos/newcmd "Cue {list}/{cue} Label {label}#"`. You can c
 | `/cuelist/next` | next page |
 | `/cuelist/last` (or `/prev`) | previous page |
 | `/cuelist/page=12`, `/cuelist/page/12`, `/cuelist/page 12` | go to page 12 |
-| `/labeler/prefix` `[text]` | add prefix (optional text overrides the box) |
-| `/labeler/suffix` `[text]` | add suffix |
-| `/labeler/both`, `/labeler/remove`, `/labeler/undo` | — |
-| `/labeler/cue "2/5"` | target a specific cue |
+| `/label/prefix="My Prefix"` | add that prefix to the target cue (it also becomes the app's prefix) |
+| `/label/suffix="My Suffix"` | add that suffix |
+| `/label/prefix`, `/label/suffix` | add the prefix/suffix currently in the app |
+| `/label/both`, `/label/remove`, `/label/undo` | — |
+| `/label/cue="2/5"` | target a specific cue |
 
-From an EOS macro or cue, send the OSC string `/cuelist/page=12`. EOS sends that as `/cuelist/page` with the argument `12`, and both forms work.
+The text can come after `=`, or as a string argument (`/label/prefix "My Prefix"`). `/labeler/...` works too.
+
+From an EOS macro or cue, send the OSC string `/cuelist/page=12`. EOS sends that as `/cuelist/page` with the argument `12`, and both forms work. Cuelist matches page *names* exactly, so `/cuelist/page=12A` works if you have a page named 12A.
 
 ## Cuelist control
 

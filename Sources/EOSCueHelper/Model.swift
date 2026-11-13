@@ -44,15 +44,12 @@ enum Pref {
     static let prefix = "prefix"
     static let suffix = "suffix"
     static let autoSpace = "autoSpace"
-    static let labelTemplate = "labelTemplate"
     static let cuelistEnabled = "cuelistEnabled"
     static let pageOnCueFire = "pageOnCueFire"
     static let pageOnCueFireList = "pageOnCueFireList"
     static let keepOnTop = "keepOnTop"
     static let logIncoming = "logIncoming"
     static let autoUpdate = "autoUpdate"
-
-    static let defaultTemplate = "Cue {list}/{cue} Label {label}#"
 
     static func register() {
         UserDefaults.standard.register(defaults: [
@@ -67,7 +64,6 @@ enum Pref {
             prefix: "",
             suffix: "",
             autoSpace: true,
-            labelTemplate: defaultTemplate,
             cuelistEnabled: true,
             pageOnCueFire: false,
             pageOnCueFireList: "2",
@@ -85,7 +81,6 @@ final class AppModel: ObservableObject {
     private let d = UserDefaults.standard
     private let udp = UDPSocket()
     private let tcp = TCPClient()
-    private var pingTimer: Timer?
     private var labelTimeout: DispatchWorkItem?
     private var pendingOp: (op: LabelOp, prefix: String?, suffix: String?)?
     private var activity: NSObjectProtocol?
@@ -97,7 +92,6 @@ final class AppModel: ObservableObject {
     @Published var connError: String?
     @Published var lastHeardFromEOS: Date?
     @Published var eosVersion: String?
-    @Published var now = Date()
 
     // EOS state
     @Published var commandLine = ""
@@ -164,7 +158,7 @@ final class AppModel: ObservableObject {
     var health: Health {
         if !running { return .off }
         if activeMode == .tcp && !tcpConnected { return connError == nil ? .waiting : .error }
-        if let t = lastHeardFromEOS, now.timeIntervalSince(t) < 8 { return .ok }
+        if activeMode == .tcp || lastHeardFromEOS != nil { return .ok }
         return connError == nil ? .waiting : .error
     }
 
@@ -174,7 +168,7 @@ final class AppModel: ObservableObject {
         case .ok: return "Connected to EOS" + (eosVersion.map { " \($0)" } ?? "")
         case .waiting:
             return activeMode == .tcp && !tcpConnected ? "Connecting to \(eosIP):\(d.integer(forKey: Pref.tcpPort))…"
-                : "Waiting for EOS replies… (check EOS OSC TX settings)"
+                : "Listening — nothing heard from EOS yet (check EOS OSC TX settings)"
         case .error: return connError ?? "Error"
         }
     }
@@ -206,20 +200,9 @@ final class AppModel: ObservableObject {
             addLog(.info, "Sending UDP to \(eosIP):\(d.integer(forKey: Pref.udpSendPort))")
             hello()
         }
-
-        pingTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                guard let self else { return }
-                self.now = Date()
-                self.send("/eos/ping", log: false)
-                if self.eosVersion == nil, self.lastHeardFromEOS != nil { self.send("/eos/get/version", log: false) }
-            }
-        }
     }
 
     func disconnect(quiet: Bool = false) {
-        pingTimer?.invalidate()
-        pingTimer = nil
         udp.close()
         tcp.stop()
         tcpConnected = false
@@ -227,9 +210,9 @@ final class AppModel: ObservableObject {
         running = false
     }
 
+    /// Sent once per connect (never on a timer): asks EOS for its version, which also confirms it's answering.
     private func hello() {
         send("/eos/get/version", log: false)
-        send("/eos/ping", log: false)
         if let t = target { requestLabel(t) }
     }
 
@@ -255,13 +238,16 @@ final class AppModel: ObservableObject {
         let p = m.parts
         let lower = m.address.lowercased()
 
-        if p.first == "eos" { lastHeardFromEOS = Date(); now = Date(); connError = activeMode == .tcp ? connError : nil }
+        if p.first == "eos" {
+            if lastHeardFromEOS == nil && activeMode == .udp { connError = nil }
+            lastHeardFromEOS = Date()
+        }
 
-        let noisy = lower == "/eos/out/ping" || lower.hasPrefix("/eos/out/get/cue/")
+        let noisy = lower.hasPrefix("/eos/out/get/cue/")
         if d.bool(forKey: Pref.logIncoming) && !noisy { addLog(.rx, m.debugText) }
 
         if lower.hasPrefix("/cuelist") { handleCuelist(m); return }
-        if lower.hasPrefix("/labeler") { handleLabelerTrigger(m); return }
+        if lower.hasPrefix("/label") { handleLabelerTrigger(m); return }
         guard p.count >= 3, p[0] == "eos", p[1] == "out" else { return }
 
         switch p[2] {
@@ -455,41 +441,62 @@ final class AppModel: ObservableObject {
     }
 
     private func writeLabel(_ label: String, to cue: CueRef, old: String, isUndo: Bool = false) {
-        // '#' is Enter on the EOS command line, so it can't appear in label text.
-        let clean = label.replacingOccurrences(of: "#", with: "")
-        var template = d.string(forKey: Pref.labelTemplate) ?? Pref.defaultTemplate
-        if template.trimmingCharacters(in: .whitespaces).isEmpty { template = Pref.defaultTemplate }
-        var cmd = template
-            .replacingOccurrences(of: "{list}", with: cue.list)
-            .replacingOccurrences(of: "{cue}", with: cue.number)
-            .replacingOccurrences(of: "{label}", with: clean)
-        if clean.isEmpty { cmd = cmd.replacingOccurrences(of: "Label #", with: "Label#") }
-        send("/eos/newcmd", [.string(cmd)])
-        addLog(.info, "Cue \(cue.display): \"\(old)\" → \"\(clean)\"")
-        lastChange = isUndo ? nil : (cue, old, clean)
-        if cue == target { targetLabel = clean }
-        // Confirm what EOS actually stored.
+        // Writes the label directly; doesn't touch anyone's command line.
+        send("/eos/set/cue/\(cue.list)/\(cue.number)/label", [.string(label)])
+        addLog(.info, "Cue \(cue.display): \"\(old)\" → \"\(label)\"")
+        lastChange = isUndo ? nil : (cue, old, label)
+        if cue == target { targetLabel = label }
+        // Read it back once to confirm what EOS actually stored.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             guard let self, self.target == cue else { return }
             self.send("/eos/get/cue/\(cue.list)/\(cue.number)", log: false)
         }
     }
 
-    /// /labeler/prefix, /labeler/suffix, /labeler/both, /labeler/remove — optional string arg overrides the text.
+    /// Splits "/label/prefix=\"My Prefix\"", "/label/prefix \"My Prefix\"" (string arg) or "/cuelist/page/12"
+    /// into a lower-cased command and an optional value (quotes stripped, case kept).
+    private func splitCommand(_ m: OSCMessage) -> (cmd: String, value: String?) {
+        let rest = m.parts.dropFirst().joined(separator: "/")
+        var cmd = rest
+        var value: String?
+        if let eq = rest.firstIndex(of: "=") {
+            cmd = String(rest[..<eq])
+            value = String(rest[rest.index(after: eq)...])
+        } else if let slash = rest.firstIndex(of: "/") {
+            cmd = String(rest[..<slash])
+            value = String(rest[rest.index(after: slash)...])
+        }
+        if value?.isEmpty ?? true, let a = m.args.first { value = a.text }
+        value = value.map { v in
+            var s = v.trimmingCharacters(in: .whitespaces)
+            let quotes: Set<Character> = ["\"", "'", "“", "”", "‘", "’"]
+            if s.count >= 2, let f = s.first, let l = s.last, quotes.contains(f), quotes.contains(l) {
+                s = String(s.dropFirst().dropLast())
+            }
+            return s
+        }
+        return (cmd.lowercased(), value)
+    }
+
+    /// /label/prefix="My Prefix", /label/suffix="My Suffix", /label/both, /label/remove, /label/undo, /label/cue="2/5"
+    /// (/labeler/... works too). With text, it also becomes the app's current prefix/suffix.
     private func handleLabelerTrigger(_ m: OSCMessage) {
-        let p = m.parts.map { $0.lowercased() }
-        guard p.count >= 2 else { return }
-        let arg = m.args.first.map { $0.text }
         addLog(.rx, m.debugText)
-        switch p[1] {
-        case "prefix": apply(.prefix, prefix: arg)
-        case "suffix": apply(.suffix, suffix: arg)
+        let (cmd, value) = splitCommand(m)
+        let text = (value?.isEmpty ?? true) ? nil : value
+        switch cmd {
+        case "prefix":
+            if let text { d.set(text, forKey: Pref.prefix) }
+            apply(.prefix, prefix: text)
+        case "suffix":
+            if let text { d.set(text, forKey: Pref.suffix) }
+            apply(.suffix, suffix: text)
         case "both", "apply": apply(.both)
         case "remove": apply(.remove)
         case "undo": undo()
         case "cue", "target":
-            if let arg { setTargetFromText(arg) }
-        default: addLog(.error, "Unknown labeler command \(m.address)")
+            if let text { setTargetFromText(text) }
+        default: addLog(.error, "Unknown label command \(m.address)")
         }
     }
 
@@ -502,22 +509,13 @@ final class AppModel: ObservableObject {
             addLog(.info, "Cuelist control is turned off — ignored")
             return
         }
-        let parts = m.parts.map { $0.lowercased() }
-        guard parts.count >= 2 else { return }
-        var cmd = parts[1]
-        var value: String? = parts.count >= 3 ? parts[2] : nil
-        if let eq = cmd.firstIndex(of: "=") {
-            value = String(cmd[cmd.index(after: eq)...])
-            cmd = String(cmd[..<eq])
-        }
-        if value == nil, let a = m.args.first { value = a.text }
-
+        let (cmd, value) = splitCommand(m)
         switch cmd {
         case "next", "forward", "fwd": cuelist(.next)
         case "last", "prev", "previous", "back": cuelist(.previous)
         case "page", "goto":
-            if let v = value, let n = Double(v.trimmingCharacters(in: .whitespaces)), n >= 1 {
-                cuelist(.page(Int(n)))
+            if let v = value, !v.isEmpty {
+                cuelist(.page(v))
             } else {
                 addLog(.error, "\(m.address) needs a page number, e.g. /cuelist/page=12")
             }

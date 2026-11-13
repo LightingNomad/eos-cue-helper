@@ -352,7 +352,7 @@ struct CuelistSection: View {
                     TextField("Page", text: $page)
                         .frame(width: 60)
                         .onSubmit(goToPage)
-                    Button("Go", action: goToPage).disabled(Int(page) == nil)
+                    Button("Go", action: goToPage).disabled(page.trimmingCharacters(in: .whitespaces).isEmpty)
                     Button { model.cuelist(.next) } label: { Label("Next", systemImage: "chevron.right") }
                     Spacer()
                 }
@@ -374,8 +374,9 @@ struct CuelistSection: View {
     }
 
     private func goToPage() {
-        guard let n = Int(page.trimmingCharacters(in: .whitespaces)), n > 0 else { return }
-        model.cuelist(.page(n))
+        let name = page.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return }
+        model.cuelist(.page(name))
     }
 }
 
@@ -428,7 +429,6 @@ struct LogView: View {
 struct SettingsView: View {
     @EnvironmentObject var updater: Updater
     @AppStorage(Pref.defaultList) private var defaultList = "1"
-    @AppStorage(Pref.labelTemplate) private var template = Pref.defaultTemplate
     @AppStorage(Pref.autoUpdate) private var autoUpdate = true
 
     var body: some View {
@@ -436,17 +436,15 @@ struct SettingsView: View {
             Section("EOS") {
                 TextField("Default cue list", text: $defaultList)
                     .help("Used when the command line says \"Cue 5\" without a list and no active/pending cue is known")
-                TextField("Label command", text: $template)
-                Text("Sent to /eos/newcmd. {list}, {cue}, {label} are filled in; # means Enter.")
+                Text("Labels are written with /eos/set/cue/<list>/<cue>/label \"text\".")
                     .font(.caption).foregroundStyle(.secondary)
-                Button("Reset to default") { template = Pref.defaultTemplate }
             }
             Section("OSC triggers (send to the listen port)") {
                 Text("""
                 /cuelist/next   /cuelist/last   /cuelist/page=12
-                /labeler/prefix   /labeler/suffix   /labeler/both
-                /labeler/remove   /labeler/undo   /labeler/cue "2/5"
-                /labeler/prefix "TEXT"  (override the prefix text)
+                /label/prefix="My Prefix"   /label/suffix="My Suffix"
+                /label/prefix   /label/suffix   (use the text in the app)
+                /label/both   /label/remove   /label/undo   /label/cue="2/5"
                 """)
                 .font(.system(.caption, design: .monospaced))
                 .textSelection(.enabled)
