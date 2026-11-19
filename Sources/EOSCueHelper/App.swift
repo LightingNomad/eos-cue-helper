@@ -335,6 +335,29 @@ struct CuelistSection: View {
                         .foregroundStyle(model.cuelistError ? .red : .secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                HStack {
+                    Text("Turn pages in:").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button { model.refreshCuelistTabs() } label: { Image(systemName: "arrow.clockwise") }
+                        .buttonStyle(.borderless).font(.caption)
+                        .help("Look for Cuelist tabs in Chrome again")
+                }
+                if model.cuelistTabs.isEmpty {
+                    Text("No Cuelist tabs found in Chrome").font(.caption).foregroundStyle(.secondary)
+                }
+                ForEach(model.cuelistTabs) { tab in
+                    Toggle(isOn: Binding(get: { !model.excludedTabs.contains(tab.id) },
+                                         set: { model.setTab(tab.id, included: $0) })) {
+                        HStack(spacing: 4) {
+                            Text("Window \(tab.window)")
+                            if !tab.screen.isEmpty { Text("· \(tab.screen)").foregroundStyle(.secondary) }
+                            Spacer()
+                            if !tab.page.isEmpty { Text("page \(tab.page)").foregroundStyle(.secondary) }
+                        }
+                    }
+                    .toggleStyle(.checkbox)
+                    .font(.caption)
+                }
                 HStack(spacing: 4) {
                     Toggle("Next page when EOS cue list", isOn: $pageOnFire).toggleStyle(.checkbox)
                     TextField("", text: $fireList).frame(width: 34).disabled(!pageOnFire)
@@ -343,6 +366,11 @@ struct CuelistSection: View {
                 .font(.caption)
             }
             .padding(4)
+        }
+        .onAppear { model.refreshCuelistTabs() }
+        // Re-check tabs whenever you switch back to this app (no background polling).
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            model.refreshCuelistTabs()
         }
     }
 

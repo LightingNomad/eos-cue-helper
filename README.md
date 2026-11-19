@@ -63,6 +63,8 @@ From an EOS macro or cue, send the OSC string `/cuelist/page=12`. EOS sends that
 
 ## Cuelist control
 
+Page turns go to **every Cuelist tab open in Chrome**, in any window, including one on an external monitor. The Cuelist section lists each tab by window number, display and current page. Untick a tab to leave it out. New tabs are included automatically. The list refreshes when you switch back to the app, or when you click ↻.
+
 The app runs a little JavaScript in the Cuelist tab through AppleScript, so Chrome doesn't need to be in front. You need:
 1. Chrome ▸ View ▸ Developer ▸ **Allow JavaScript from Apple Events** turned on.
 2. Click **OK** the first time macOS asks to let EOS Cue Helper control Google Chrome. After an update that asks again, click OK again.

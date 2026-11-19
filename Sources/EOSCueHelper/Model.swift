@@ -94,6 +94,9 @@ final class AppModel: ObservableObject {
     // Cuelist
     @Published var cuelistStatus = ""
     @Published var cuelistError = false
+    @Published var cuelistTabs: [CuelistTab] = []
+    /// Tabs the user unticked. New tabs are included by default.
+    @Published var excludedTabs: Set<Int> = []
 
     @Published var log: [LogLine] = []
 
@@ -497,18 +500,43 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Turns pages in every open Cuelist tab except the ones unticked in the app.
     func cuelist(_ action: CuelistDriver.Action, reason: String? = nil) {
         if let reason { addLog(.info, "\(action.name) (\(reason))") }
-        CuelistDriver.perform(action) { [weak self] result in
+        if !cuelistTabs.isEmpty && cuelistTabs.allSatisfy({ excludedTabs.contains($0.id) }) {
+            cuelistError = true
+            cuelistStatus = "All Cuelist tabs are unticked — nothing to turn"
+            return
+        }
+        runCuelist(action)
+    }
+
+    /// Re-reads the list of open Cuelist tabs without changing any page.
+    func refreshCuelistTabs() { runCuelist(nil) }
+
+    func setTab(_ id: Int, included: Bool) {
+        if included { excludedTabs.remove(id) } else { excludedTabs.insert(id) }
+    }
+
+    private func runCuelist(_ action: CuelistDriver.Action?) {
+        CuelistDriver.perform(action, excluding: excludedTabs) { [weak self] result in
             guard let self else { return }
             switch result {
-            case .success(let page):
+            case .success(let tabs):
+                self.cuelistTabs = tabs
+                self.excludedTabs.formIntersection(tabs.map(\.id)) // forget closed tabs
                 self.cuelistError = false
-                self.cuelistStatus = page.isEmpty ? "\(action.name) ✓" : "Page \(page)"
+                let pages = Set(tabs.filter { !self.excludedTabs.contains($0.id) }.map(\.page))
+                if let action {
+                    self.cuelistStatus = pages.count == 1 ? "\(action.name) ✓ — page \(pages.first!)" : "\(action.name) ✓"
+                } else {
+                    self.cuelistStatus = ""
+                }
             case .failure(let e):
+                self.cuelistTabs = []
                 self.cuelistError = true
                 self.cuelistStatus = e.localizedDescription
-                self.addLog(.error, "Cuelist: \(e.localizedDescription)")
+                if action != nil { self.addLog(.error, "Cuelist: \(e.localizedDescription)") }
             }
         }
     }
