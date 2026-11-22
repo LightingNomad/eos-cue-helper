@@ -73,7 +73,7 @@ enum CuelistDriver {
     """
 
     /// Runs `js` (if not empty) in every Cuelist tab except the skipped ones, waits a moment, then
-    /// reports every Cuelist tab, one line each: id, window #, bounds (l t r b), page, title.
+    /// reports every Cuelist tab, one line each: tab id, window #, window id, bounds (l t r b), page, title.
     private static let appleScript = """
     on run argv
       set js to item 1 of argv
@@ -91,7 +91,7 @@ enum CuelistDriver {
             if (URL of t) contains "thecuelist.com" then
               set tid to (id of t) as text
               if js is not "" and skipList does not contain ("," & tid & ",") then execute t javascript js
-              set end of found to {t, tid, wi, bounds of w}
+              set end of found to {t, tid, wi, bounds of w, (id of w) as text}
             end if
           end repeat
         end repeat
@@ -103,7 +103,7 @@ enum CuelistDriver {
           set b to item 4 of x
           set r to execute t javascript readJS
           if r is missing value then set r to ""
-          set out to out & (item 2 of x) & sepT & (item 3 of x) & sepT & (item 1 of b) & sepT & (item 2 of b) & sepT & (item 3 of b) & sepT & (item 4 of b) & sepT & r & sepT & (title of t) & sepN
+          set out to out & (item 2 of x) & sepT & (item 3 of x) & sepT & (item 5 of x) & sepT & (item 1 of b) & sepT & (item 2 of b) & sepT & (item 3 of b) & sepT & (item 4 of b) & sepT & r & sepT & (title of t) & sepN
         end repeat
       end tell
       return out
@@ -116,7 +116,7 @@ enum CuelistDriver {
         let js = action.map(script(for:)) ?? ""
         let skip = "," + excluded.map(String.init).joined(separator: ",") + ","
         queue.async {
-            let result = run([js, readPageScript, skip]).map(parseTabs)
+            let result = run(appleScript, [js, readPageScript, skip]).map(parseTabs)
             DispatchQueue.main.async { completion(result) }
         }
     }
@@ -124,10 +124,11 @@ enum CuelistDriver {
     private static func parseTabs(_ text: String) -> [CuelistTab] {
         text.split(separator: "\n").compactMap { line in
             let f = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
-            guard f.count >= 7, let id = Int(f[0]), let win = Int(f[1]),
-                  let l = Double(f[2]), let t = Double(f[3]), let r = Double(f[4]), let b = Double(f[5]) else { return nil }
-            return CuelistTab(id: id, window: win, screen: screenName(left: l, top: t, right: r, bottom: b),
-                              page: f[6], title: f.count > 7 ? f[7] : "")
+            guard f.count >= 8, let id = Int(f[0]), let win = Int(f[1]), let winID = Int(f[2]),
+                  let l = Double(f[3]), let t = Double(f[4]), let r = Double(f[5]), let b = Double(f[6]) else { return nil }
+            return CuelistTab(id: id, window: win, windowID: winID,
+                              screen: screenName(left: l, top: t, right: r, bottom: b),
+                              page: f[7], title: f.count > 8 ? f[8] : "")
         }
     }
 
@@ -140,10 +141,60 @@ enum CuelistDriver {
         return s.localizedName
     }
 
-    private static func run(_ args: [String]) -> Result<String, TransportError> {
+    // MARK: Fast page turns
+
+    /// Sends the keystroke straight to one known tab — no searching through Chrome's windows, no waiting.
+    private static let turnScript = """
+    on run argv
+      tell application "Google Chrome"
+        return (execute tab id ((item 2 of argv) as integer) of window id ((item 3 of argv) as integer) javascript (item 1 of argv)) as text
+      end tell
+    end run
+    """
+
+    private static let turnQueue = DispatchQueue(label: "eoscuehelper.cuelist.turn", attributes: .concurrent)
+
+    struct TurnResult {
+        var failed: [CuelistTab] = []
+        var errors: [String] = []
+        var slowest: (tab: CuelistTab, seconds: Double)?
+        var elapsed: Double = 0
+    }
+
+    /// Runs `action` in all `tabs` at the same time (one slow tab can't hold up the others).
+    /// Completion runs on main once every tab has answered.
+    static func turn(_ action: Action, in tabs: [CuelistTab], completion: @escaping (TurnResult) -> Void) {
+        let js = script(for: action)
+        let group = DispatchGroup()
+        let lock = NSLock()
+        var result = TurnResult()
+        let start = Date()
+        for tab in tabs {
+            group.enter()
+            turnQueue.async {
+                let t0 = Date()
+                let r = run(turnScript, [js, String(tab.id), String(tab.windowID)])
+                let secs = Date().timeIntervalSince(t0)
+                lock.lock()
+                if case .failure(let e) = r {
+                    result.failed.append(tab)
+                    result.errors.append(e.localizedDescription)
+                }
+                if secs > (result.slowest?.seconds ?? -1) { result.slowest = (tab, secs) }
+                lock.unlock()
+                group.leave()
+            }
+        }
+        group.notify(queue: .main) {
+            result.elapsed = Date().timeIntervalSince(start)
+            completion(result)
+        }
+    }
+
+    private static func run(_ script: String, _ args: [String]) -> Result<String, TransportError> {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        p.arguments = ["-e", appleScript] + args
+        p.arguments = ["-e", script] + args
         let out = Pipe(), err = Pipe()
         p.standardOutput = out
         p.standardError = err
@@ -170,6 +221,7 @@ enum CuelistDriver {
 struct CuelistTab: Identifiable, Equatable {
     let id: Int        // Chrome's tab id (stable while Chrome is open)
     let window: Int    // Chrome window number, front-most first
+    let windowID: Int  // Chrome's window id
     let screen: String // display the window is on
     let page: String   // "39 / 123"
     let title: String

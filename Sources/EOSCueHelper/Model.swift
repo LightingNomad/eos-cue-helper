@@ -508,7 +508,38 @@ final class AppModel: ObservableObject {
             cuelistStatus = "All Cuelist tabs are unticked — nothing to turn"
             return
         }
-        runCuelist(action)
+        let targets = cuelistTabs.filter { !excludedTabs.contains($0.id) }
+        guard !targets.isEmpty else {
+            runCuelist(action) // tabs not known yet: find them and turn in one go (slower, first time only)
+            return
+        }
+        // Fast path: straight to each known tab, all at once.
+        CuelistDriver.turn(action, in: targets) { [weak self] r in
+            guard let self else { return }
+            let time = String(format: "%.2f s", r.elapsed)
+            if r.failed.isEmpty {
+                self.cuelistError = false
+                self.cuelistStatus = "\(action.name) ✓ (\(time))"
+                if r.elapsed > 1, let slow = r.slowest {
+                    self.addLog(.info, "Cuelist \(action.name.lowercased()) took \(time) — slowest was Window \(slow.tab.window) (\(slow.tab.screen)). Chrome may be throttling that tab.")
+                }
+            } else {
+                self.cuelistError = true
+                self.cuelistStatus = "\(r.failed.count) Cuelist tab(s) didn't respond — rechecking tabs"
+                self.addLog(.error, "Cuelist: \(r.errors.first ?? "tab didn't respond")")
+            }
+            self.scheduleCuelistReadback()
+        }
+    }
+
+    private var readbackWork: DispatchWorkItem?
+
+    /// Updates the page numbers shown in the app shortly after the last turn (never delays a turn).
+    private func scheduleCuelistReadback() {
+        readbackWork?.cancel()
+        let w = DispatchWorkItem { [weak self] in self?.refreshCuelistTabs() }
+        readbackWork = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: w)
     }
 
     /// Re-reads the list of open Cuelist tabs without changing any page.
@@ -525,13 +556,12 @@ final class AppModel: ObservableObject {
             case .success(let tabs):
                 self.cuelistTabs = tabs
                 self.excludedTabs.formIntersection(tabs.map(\.id)) // forget closed tabs
-                self.cuelistError = false
-                let pages = Set(tabs.filter { !self.excludedTabs.contains($0.id) }.map(\.page))
                 if let action {
-                    self.cuelistStatus = pages.count == 1 ? "\(action.name) ✓ — page \(pages.first!)" : "\(action.name) ✓"
-                } else {
-                    self.cuelistStatus = ""
+                    self.cuelistStatus = "\(action.name) ✓"
+                } else if self.cuelistError {
+                    self.cuelistStatus = "" // a plain re-check clears an old error, but keeps "Next page ✓ (0.08 s)"
                 }
+                self.cuelistError = false
             case .failure(let e):
                 self.cuelistTabs = []
                 self.cuelistError = true
